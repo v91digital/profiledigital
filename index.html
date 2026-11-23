@@ -177,6 +177,7 @@
       border: 2px solid #050914;
     }
   </style>
+  <script id="v91-baked-config" type="application/json"></script>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-gold-500/30 selection:text-gold-300">
 
@@ -380,7 +381,12 @@
             <p class="text-xs text-chrome-400">Kelola data perusahaan, gambar visual, poin marketing, katalog layanan &amp; keamanan</p>
           </div>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <span id="cmsStorageBadge" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300">Auto-Save Aktif</span>
+          <button id="cmsDownloadHtmlBtn" type="button" title="Unduh file index.html baru dengan semua perubahan tertanam permanen" class="btn-gold px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5">
+            <i data-lucide="download" class="w-3.5 h-3.5"></i>
+            <span>Unduh index.html Permanen</span>
+          </button>
           <button id="cmsLogoutBtn" type="button" class="px-3 py-1.5 rounded-lg bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500/25 text-xs font-semibold inline-flex items-center gap-1.5">
             <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
             <span>Keluar Aman</span>
@@ -848,41 +854,171 @@
       };
 
       // =========================================================================
-      // 3. STATE MANAGEMENT & PERSISTENCE
+      // 3. STATE MANAGEMENT & MULTI-LAYER PERSISTENCE (Baked HTML + IndexedDB + LocalStorage)
       // =========================================================================
+      const IDB_NAME = 'v91_virtu_cms_db_v1';
+      const IDB_STORE = 'kv';
+      let storageBackendMode = 'Memeriksa...';
+
       function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 
-      function loadSiteData() {
-        const raw = safeStorageGet(localStorage, STORAGE_DATA_KEY);
-        if (!raw) return deepClone(DEFAULT_DATA);
+      function readBakedConfig() {
         try {
-          const parsed = JSON.parse(raw);
-          return {
-            brand: Object.assign({}, DEFAULT_DATA.brand, parsed.brand || {}),
-            images: Object.assign({}, DEFAULT_DATA.images, parsed.images || {}),
-            homeConfig: Object.assign({}, DEFAULT_DATA.homeConfig, parsed.homeConfig || {}, {
-              kpis: Array.isArray(parsed.homeConfig && parsed.homeConfig.kpis) ? parsed.homeConfig.kpis : deepClone(DEFAULT_DATA.homeConfig.kpis)
-            }),
-            marketingPillars: Array.isArray(parsed.marketingPillars) ? parsed.marketingPillars : deepClone(DEFAULT_DATA.marketingPillars),
-            pricingLevels: Array.isArray(parsed.pricingLevels) ? parsed.pricingLevels : deepClone(DEFAULT_DATA.pricingLevels),
-            catalog: Array.isArray(parsed.catalog) ? parsed.catalog : deepClone(DEFAULT_DATA.catalog),
-            workflowSteps: Array.isArray(parsed.workflowSteps) ? parsed.workflowSteps : deepClone(DEFAULT_DATA.workflowSteps),
-            techStacks: Array.isArray(parsed.techStacks) ? parsed.techStacks : deepClone(DEFAULT_DATA.techStacks)
-          };
+          const el = document.getElementById('v91-baked-config');
+          if (!el || !el.textContent || !el.textContent.trim()) return null;
+          return JSON.parse(el.textContent);
         } catch (e) {
-          return deepClone(DEFAULT_DATA);
+          return null;
+        }
+      }
+
+      function mergeSiteData(base, override) {
+        if (!override) return deepClone(base);
+        return {
+          brand: Object.assign({}, base.brand, override.brand || {}),
+          images: Object.assign({}, base.images, override.images || {}),
+          homeConfig: Object.assign({}, base.homeConfig, override.homeConfig || {}, {
+            kpis: Array.isArray(override.homeConfig && override.homeConfig.kpis) ? override.homeConfig.kpis : deepClone(base.homeConfig.kpis)
+          }),
+          marketingPillars: Array.isArray(override.marketingPillars) ? override.marketingPillars : deepClone(base.marketingPillars),
+          pricingLevels: Array.isArray(override.pricingLevels) ? override.pricingLevels : deepClone(base.pricingLevels),
+          catalog: Array.isArray(override.catalog) ? override.catalog : deepClone(base.catalog),
+          workflowSteps: Array.isArray(override.workflowSteps) ? override.workflowSteps : deepClone(base.workflowSteps),
+          techStacks: Array.isArray(override.techStacks) ? override.techStacks : deepClone(base.techStacks)
+        };
+      }
+
+      function getEffectiveDefaultData() {
+        const baked = readBakedConfig();
+        if (baked && baked.data) return mergeSiteData(DEFAULT_DATA, baked.data);
+        return deepClone(DEFAULT_DATA);
+      }
+
+      function openIdb() {
+        return new Promise((resolve, reject) => {
+          try {
+            if (!window.indexedDB) return reject(new Error('No IndexedDB'));
+            const req = indexedDB.open(IDB_NAME, 1);
+            req.onupgradeneeded = () => {
+              const db = req.result;
+              if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error || new Error('IDB open error'));
+          } catch (e) { reject(e); }
+        });
+      }
+
+      function idbGet(key) {
+        return openIdb().then(db => new Promise((resolve, reject) => {
+          try {
+            const tx = db.transaction(IDB_STORE, 'readonly');
+            const req = tx.objectStore(IDB_STORE).get(key);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          } catch (e) { reject(e); }
+        })).catch(() => null);
+      }
+
+      function idbSet(key, val) {
+        return openIdb().then(db => new Promise((resolve, reject) => {
+          try {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).put(val, key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => reject(tx.error);
+          } catch (e) { reject(e); }
+        })).catch(() => false);
+      }
+
+      function updateStorageBadge() {
+        const el = document.getElementById('cmsStorageBadge');
+        if (!el) return;
+        el.textContent = storageBackendMode;
+      }
+
+      function loadSiteData() {
+        const base = getEffectiveDefaultData();
+        const raw = safeStorageGet(localStorage, STORAGE_DATA_KEY);
+        if (!raw) return base;
+        try {
+          return mergeSiteData(base, JSON.parse(raw));
+        } catch (e) {
+          return base;
         }
       }
 
       function saveSiteData() {
-        safeStorageSet(localStorage, STORAGE_DATA_KEY, JSON.stringify(state.data));
+        // 1. Save full payload (including high-res custom images) to IndexedDB (50MB+ quota)
+        idbSet(STORAGE_DATA_KEY, state.data).then(okIdb => {
+          // 2. Also mirror to localStorage (full if fits, otherwise text-only without huge base64 images)
+          let okLs = safeStorageSet(localStorage, STORAGE_DATA_KEY, JSON.stringify(state.data));
+          if (!okLs) {
+            const slim = deepClone(state.data);
+            Object.keys(slim.images || {}).forEach(k => {
+              if (typeof slim.images[k] === 'string' && slim.images[k].length > 150000) {
+                delete slim.images[k];
+              }
+            });
+            okLs = safeStorageSet(localStorage, STORAGE_DATA_KEY, JSON.stringify(slim));
+          }
+          if (okIdb) {
+            storageBackendMode = 'Tersimpan Permanen (IndexedDB)';
+          } else if (okLs) {
+            storageBackendMode = 'Tersimpan di Browser (LocalStorage)';
+          } else {
+            storageBackendMode = 'Mode Sementara — Gunakan Unduh HTML';
+            showToast('Browser membatasi penyimpanan lokal. Klik "Unduh index.html Permanen" agar perubahan tidak hilang saat refresh!', 'warning');
+          }
+          updateStorageBadge();
+        });
+      }
+
+      function exportBakedHtmlFile() {
+        try {
+          const payload = {
+            version: 'v91-baked-2026',
+            savedAt: new Date().toISOString(),
+            data: state.data,
+            sec: {
+              userHash: state.sec.userHash,
+              passHash: state.sec.passHash
+            }
+          };
+          const jsonStr = JSON.stringify(payload).replace(/<\/script/gi, '<\\/script');
+          const clone = document.documentElement.cloneNode(true);
+          // Close open modals & clear transient UI in exported copy
+          ['adminLoginModal', 'adminCmsModal', 'confirmDialogModal', 'mobileMenu'].forEach(id => {
+            const m = clone.querySelector('#' + id);
+            if (m) m.classList.add('hidden');
+          });
+          const toast = clone.querySelector('#toastContainer');
+          if (toast) toast.innerHTML = '';
+          const bakedTag = clone.querySelector('#v91-baked-config');
+          if (bakedTag) bakedTag.textContent = jsonStr;
+          const htmlOut = '<!DOCTYPE html>\n' + clone.outerHTML;
+          const blob = new Blob([htmlOut], { type: 'text/html;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'index.html';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          addAuditLog('Mengunduh file index.html permanen dengan konfigurasi terbaru');
+          showToast('File index.html permanen berhasil diunduh! Ganti file lama Anda dengan file ini agar permanen di semua perangkat.', 'success');
+        } catch (err) {
+          showToast('Gagal membuat file index.html permanen: ' + (err && err.message ? err.message : 'error'), 'error');
+        }
       }
 
       function loadSecMeta() {
+        const baked = readBakedConfig();
         const raw = safeStorageGet(localStorage, STORAGE_SEC_KEY);
         const def = {
-          userHash: DEFAULT_USER_HASH,
-          passHash: DEFAULT_PASS_HASH,
+          userHash: (baked && baked.sec && baked.sec.userHash) || DEFAULT_USER_HASH,
+          passHash: (baked && baked.sec && baked.sec.passHash) || DEFAULT_PASS_HASH,
           failedAttempts: 0,
           lockoutUntil: 0,
           auditLog: []
@@ -3255,6 +3391,7 @@
                 </h4>
                 <p class="text-xs text-chrome-400">Ekspor seluruh pengaturan teks &amp; gambar ke file JSON atau pulihkan konfigurasi asli PDF V91 2026.</p>
                 <div class="flex flex-wrap gap-2.5 pt-1">
+                  <button id="cmsExportHtmlTabBtn" type="button" class="btn-gold px-4 py-2 rounded-xl text-xs">Unduh index.html Permanen</button>
                   <button id="cmsExportJsonBtn" type="button" class="px-4 py-2 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 hover:bg-emerald-500/25 text-xs font-semibold">Ekspor JSON</button>
                   <label class="px-4 py-2 rounded-xl bg-blue-500/15 border border-blue-500/35 text-blue-300 hover:bg-blue-500/25 text-xs font-semibold cursor-pointer">
                     <span>Impor JSON</span>
@@ -3384,13 +3521,41 @@
             }
             const reader = new FileReader();
             reader.onload = () => {
-              state.data.images[key] = reader.result;
-              saveSiteData();
-              addAuditLog('Mengganti gambar slot: ' + key + ' (upload lokal)');
-              const prev = document.getElementById('preview_' + key);
-              if (prev) prev.src = reader.result;
-              renderPage();
-              showToast('Gambar berhasil diperbarui secara real-time!', 'success');
+              const imgObj = new Image();
+              imgObj.onload = () => {
+                try {
+                  const maxDim = key === 'logo' ? 500 : 1200;
+                  let w = imgObj.naturalWidth || imgObj.width;
+                  let h = imgObj.naturalHeight || imgObj.height;
+                  if (w > maxDim || h > maxDim) {
+                    const ratio = Math.min(maxDim / w, maxDim / h);
+                    w = Math.round(w * ratio);
+                    h = Math.round(h * ratio);
+                  }
+                  const c = document.createElement('canvas');
+                  c.width = w;
+                  c.height = h;
+                  const ctx = c.getContext('2d');
+                  ctx.drawImage(imgObj, 0, 0, w, h);
+                  const isPng = key === 'logo' || file.type === 'image/png';
+                  const compressed = isPng ? c.toDataURL('image/png') : c.toDataURL('image/jpeg', 0.82);
+                  state.data.images[key] = compressed;
+                } catch (e) {
+                  state.data.images[key] = reader.result;
+                }
+                saveSiteData();
+                addAuditLog('Mengganti gambar slot: ' + key + ' (upload lokal teroptimasi)');
+                const prev = document.getElementById('preview_' + key);
+                if (prev) prev.src = state.data.images[key];
+                renderPage();
+                showToast('Gambar berhasil diperbarui & disimpan permanen!', 'success');
+              };
+              imgObj.onerror = () => {
+                state.data.images[key] = reader.result;
+                saveSiteData();
+                renderPage();
+              };
+              imgObj.src = reader.result;
             };
             reader.readAsDataURL(file);
           });
@@ -3516,6 +3681,12 @@
           });
         }
 
+        // Export Permanent HTML inside Security Tab
+        const expHtmlTabBtn = document.getElementById('cmsExportHtmlTabBtn');
+        if (expHtmlTabBtn) {
+          expHtmlTabBtn.addEventListener('click', exportBakedHtmlFile);
+        }
+
         // Export JSON
         const expBtn = document.getElementById('cmsExportJsonBtn');
         if (expBtn) {
@@ -3630,6 +3801,7 @@
         document.getElementById('closeCmsModalBtn').addEventListener('click', () => {
           document.getElementById('adminCmsModal').classList.add('hidden');
         });
+        document.getElementById('cmsDownloadHtmlBtn').addEventListener('click', exportBakedHtmlFile);
         document.getElementById('cmsLogoutBtn').addEventListener('click', () => logoutAdmin(false));
         document.querySelectorAll('.cms-tab-btn').forEach(btn => {
           btn.addEventListener('click', () => {
@@ -3655,6 +3827,22 @@
 
         // Initial Render
         renderPage();
+
+        // Hydrate full persisted data (including large custom images) from IndexedDB
+        idbGet(STORAGE_DATA_KEY).then(saved => {
+          if (saved && saved.brand) {
+            state.data = mergeSiteData(getEffectiveDefaultData(), saved);
+            state.calcUsers = Number(state.data.homeConfig.roiDefaultUsers) || 12;
+            state.calcMonths = Number(state.data.homeConfig.roiDefaultMonths) || 24;
+            state.calcSaasFee = Number(state.data.homeConfig.roiDefaultSaasFee) || 250000;
+            storageBackendMode = 'Tersimpan Permanen (IndexedDB)';
+            updateStorageBadge();
+            renderPage();
+          } else {
+            storageBackendMode = safeStorageGet(localStorage, STORAGE_DATA_KEY) ? 'Tersimpan (LocalStorage)' : 'Siap Auto-Save (IndexedDB)';
+            updateStorageBadge();
+          }
+        });
       });
     })();
   </script>
